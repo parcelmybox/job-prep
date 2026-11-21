@@ -1,0 +1,324 @@
+# Alert only if memory stays > 90% for 5+ minutes OR if OOMKills actually occur
+(
+  avg_over_time(
+    (container_memory_working_set_bytes{namespace="ci-runners"} 
+     / kube_pod_container_resource_limits{resource="memory"})[5m:]
+  ) > 0.90
+)
+or
+(
+  increase(kube_pod_container_status_restarts_total{namespace="ci-runners"}[5m]) > 0
+)
+Here is the complete, unified cheatsheet combining the initial core concepts and the expanded Bazel BUILD/Starlark snippets and hands-on debugging scenarios in a single copy-pasteable Markdown block.
+markdown
+# Release Engineering, Observability & Build Infrastructure Cheatsheet
+
+---
+
+## 1. Observability, Prometheus, Grafana & Runbooks
+
+| Concept | Core Idea | Key Mechanics / Terms |
+| :--- | :--- | :--- |
+| **Observability (o11y)** | Inferring internal system state solely from external outputs. | **Three Pillars:** Metrics (aggregatable numbers), Logs (discrete events), Traces (request lifecycle across services). |
+| **Prometheus** | Pull-based time-series database (TSDB) & monitoring engine. | Scrapes `/metrics` endpoints via HTTP. Uses **PromQL**. Metric types: `Counter` (monotonic), `Gauge` (up/down), `Histogram` (buckets/quantiles), `Summary`. |
+| **Grafana** | Visualization & alerting UI layer. | Connects to Prometheus, Loki (logs), Tempo/Jaeger (traces). Uses variables, templates, and threshold-based alert rules. |
+| **Runbooks** | Actionable, step-by-step incident response guides. | Triggered by alerts. Contains: **Symptom**, **Impact**, **Triage Commands**, **Mitigation Steps**, and **Escalation Path**. |
+
+---
+
+## 2. Make → Bazel Migration: Runtime Issues & Solutions
+
+Migrating from imperative `Make` to declarative, sandboxed `Bazel` exposes hidden assumptions in legacy builds.
+
+### A. Object Comparison (Bit-for-Bit Reproducibility)
+* **The Issue:** `Make` builds pass locally, `Bazel` builds produce different `.o` or binary hashes, or runtime crashes occur despite identical source code.
+* **Root Causes:**
+  * Embedded `__DATE__`, `__TIME__`, or `__FILE__` macros (Bazel uses sandbox paths like `/execroot/_main/...`).
+  * Unsorted directory wildcard expansions (`$(wildcard *.c)` vs `glob(["*.c"])`).
+  * Compiler flags injecting random seeds or local host paths (`-fdebug-prefix-map` missing).
+* **Validation Tooling:** Use `objdump -d`, `readelf -a`, `nm`, and `diffoscope` to compare symbol tables, ELF sections, and build IDs between Make and Bazel outputs.
+
+### B. Command Alignment
+* **The Issue:** Subtle differences in compiler/linker flag ordering or default flags cause ABI mismatches or undefined symbols at runtime.
+* **Fix:** Extract exact compile commands from Make (`make V=1` or `bear -- make`) and compare against Bazel (`bazel aquery 'mnemonic("CppCompile", //target)'`). Align `-isystem` vs `-I`, `-Wl,--as-needed`, and optimization levels.
+
+### C. Environment Hermeticity
+* **The Issue:** Make silently inherits `$PATH`, `LD_LIBRARY_PATH`, `/usr/include`, and host Python packages. Bazel strips environment variables to guarantee hermeticity.
+* **Fix:**
+  * Explicitly declare toolchains (`cc_toolchain`, Nix-provided sysroots/compilers) rather than relying on host `/usr/bin/gcc`.
+  * Replace implicit host lookups with explicit `BUILD` dependencies and `ctx.actions.run` environment dictionaries.
+
+### D. Dependency Tracking with `strace` Custom Tooling
+* **The Issue:** Legacy Make scripts read/write undeclared headers, config files, or temporary scripts during compilation—breaking Bazel’s sandbox.
+* **Custom `strace` Audit Approach:**
+  1. Wrap the legacy Make command: `strace -f -e trace=file -o build_trace.log make target`
+  2. Parse `openat()`, `stat()`, `execve()` syscalls with a Python script to filter out standard system paths (`/lib`, `/proc`, `/dev`).
+  3. Diff the accessed file list against Bazel’s declared `srcs`, `hdrs`, and `data` attributes to catch missing dependencies before sandboxing fails.
+
+---
+
+## 3. Dynamic Validation Pipeline Based on Changeset
+
+Instead of running a monolithic 40-checker pipeline on every commit, inspect `git diff` (or `bazel query rdeps(...)`) to dynamically route jobs.
+
+| Changeset Trigger | Scope / Risk | Dynamic Pipeline Validation Strategy |
+| :--- | :--- | :--- |
+| **Only `.md` / `.txt` files** | Zero binary impact | Skip compilation & hardware tests. Run **docs linter / spellcheck** only (~30 sec). |
+| **SDK Version Change** | High ABI/API & toolchain risk | Trigger **full clean rebuild**, ABI compliance checker (`abi-dumper`), cross-architecture builds, and full hardware-in-the-loop (HIL) regression suite. |
+| **New Hardware Defined** | Platform/BSP & driver impact | Register new `platform()` / `constraint_value` in Bazel. Run cross-compilation matrix, device-tree/firmware packaging checks, and hardware emulator tests. |
+| **Process Changes (New SDK)** | Workflow & artifact signing risk | Validate updated CI scripts/toolchains in an isolated canary branch, verify artifact provenance/checksums, and run smoke tests on staging runners before rollout. |
+| **New Customer Package Added** | Packaging, licensing, & config risk | Run **target-specific** Bazel build (`bazel build //packages/customer_x:...`), license compliance scan, container/RPM structure verification, and customer-specific integration tests. |
+
+---
+
+## 4. Bazel `BUILD` & Starlark Snippets (SDKs, Platforms & Packaging)
+
+### A. Defining Hardware Platforms & Constraints (`platforms/BUILD.bazel`)
+Use `constraint_setting` and `platform` to target specific hardware boards or CPU architectures cleanly without brittle `select()` hacks on raw strings.
+
+```python
+package(default_visibility = ["//visibility:public"])
+
+# 1. Define custom hardware board constraints
+constraint_setting(name = "hardware_board")
+
+constraint_value(
+    name = "board_rev_a",
+    constraint_setting = ":hardware_board",
+)
+
+constraint_value(
+    name = "board_rev_b",
+    constraint_setting = ":hardware_board",
+)
+
+# 2. Define target platforms combining OS, CPU, and Board
+platform(
+    name = "linux_arm64_rev_b",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+        ":board_rev_b",
+    ],
+)
+```
+
+### B. SDK Version & Hardware-Specific Compilation (`src/driver/BUILD.bazel`)
+Use `select()` with `config_setting` to switch flags, SDK headers, or source files when a new SDK or hardware revision is introduced.
+
+```python
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+
+config_setting(
+    name = "sdk_v2_flag",
+    flag_values = {"//settings:sdk_version": "2.0"},
+)
+
+cc_library(
+    name = "sensor_hal",
+    srcs = select({
+        "//platforms:board_rev_a": ["hal_rev_a.cpp"],
+        "//platforms:board_rev_b": ["hal_rev_b.cpp"],
+    }),
+    hdrs = ["sensor_hal.h"],
+    copts = select({
+        ":sdk_v2_flag": ["-DUSE_SDK_V2", "-Wall", "-Werror"],
+        "//conditions:default": ["-DUSE_SDK_V1"],
+    }),
+    deps = select({
+        ":sdk_v2_flag": ["@sdk_v2//:core_libs"],
+        "//conditions:default": ["@sdk_v1//:core_libs"],
+    }),
+)
+```
+
+### C. Custom Starlark Rule for Customer Packaging & Manifests (`rules/customer_pkg.bzl`)
+Enforces strict hermetic inputs (`ctx.actions.run`) so undeclared host files cannot leak into customer deliverables.
+
+```python
+def _customer_package_impl(ctx):
+    out_tar = ctx.actions.declare_file(ctx.attr.customer_id + "_release.tar.gz")
+    manifest = ctx.actions.declare_file(ctx.attr.customer_id + "_manifest.json")
+
+    # 1. Generate deterministic JSON manifest
+    manifest_content = struct(
+        customer = ctx.attr.customer_id,
+        sdk_version = ctx.attr.sdk_version,
+        artifacts = [f.basename for f in ctx.files.binaries],
+    ).to_json()
+    ctx.actions.write(output = manifest, content = manifest_content)
+
+    # 2. Hermetically bundle binaries + manifest using tar
+    inputs = ctx.files.binaries + [manifest]
+    args = ctx.actions.args()
+    args.add("-czf", out_tar)
+    args.add("--mtime=1970-01-01 00:00:00Z")  # Ensures bit-for-bit reproducibility
+    args.add("--sort=name")
+    args.add_all(inputs)
+
+    ctx.actions.run(
+        inputs = inputs,
+        outputs = [out_tar],
+        executable = "tar",
+        arguments = [args],
+        mnemonic = "CustomerPkgTar",
+        progress_message = "Packaging release for %s" % ctx.attr.customer_id,
+    )
+
+    return [DefaultInfo(files = depset([out_tar]))]
+
+customer_package = rule(
+    implementation = _customer_package_impl,
+    attrs = {
+        "customer_id": attr.string(mandatory = True),
+        "sdk_version": attr.string(mandatory = True),
+        "binaries": attr.label_list(allow_files = True, mandatory = True),
+    },
+)
+```
+
+---
+
+## 5. Typical Technical Questions
+
+1. **Prometheus:** *Why is high cardinality (e.g., putting `commit_sha` or `user_id` in a metric label) dangerous in Prometheus?*
+   * **Answer:** Every unique label combination creates a new time series in memory/TSDB, causing OOM crashes and slow PromQL queries. Keep high-cardinality IDs in **logs/traces**, not metric labels.
+2. **Bazel:** *A Bazel build succeeds locally (`--spawn_strategy=local`) but fails in Remote Execution (RBE) with `No such file or directory`. Why?*
+   * **Answer:** An undeclared input file (e.g., a header or script) exists on the local disk and leaked into the local build, whereas RBE only ships explicitly declared `deps`/`data` to the remote worker.
+3. **CI Scaling:** *How do you prevent 2,000 concurrent CI jobs from exhausting Kubernetes cluster resources?*
+   * **Answer:** Use event-driven ingestion (Kafka/CloudEvents), concurrency semaphores/queues at the workflow controller level, and node taints/tolerations separating lightweight linters from heavy C++ compile pods.
+
+---
+
+## 6. Hands-On Debugging Scenarios & Code Challenges
+
+### Scenario 1: The "Works in Make, Segfaults in Bazel" Binary
+* **Symptom:** A C++ binary compiled with Bazel crashes at startup with `SIGSEGV`, while the Make binary runs fine.
+* **Diagnosis Steps:**
+  1. Run `ldd` on both binaries to check linked shared libraries and load order.
+  2. Run `readelf -d <binary> | grep RPATH` to verify `RUNPATH`/`RPATH` differences (Bazel uses `$ORIGIN/_solib_...`).
+  3. Check static initialization order (`nm -C <binary> | grep _GLOBAL__sub_I`)—link order differences between Make and Bazel can invert global constructor execution.
+
+### Scenario 2: Non-Deterministic Binary Hashes Between Two Bazel Builds
+Use code with caution.
+• Symptom: Running bazel clean && bazel build //app:main twice produces different sha256sum values on the output ELF binary, breaking remote cache hits.
+• Diagnosis Steps:
+	1. Compare ELF sections and symbols with diffoscope:bash
+diffoscope bazel-bin/app/main_run1 bazel-bin/app/main_run2
+Use code with caution.
+	2. Look for differences in .rodata (embedded timestamps like __DATE__/__TIME__) or .debug_str (sandbox path variations).
+• Fix:
+	• Add -Wno-builtin-macro-redefined -D__DATE__="redacted" -D__TIME__="redacted" to toolchain copts.
+	• Ensure -ffile-prefix-map=$PWD=. is enabled in your cc_toolchain so debug symbols don't encode temporary sandbox worker IDs.
+
+Scenario 3: Make Binary Works, Bazel Binary Fails with undefined symbol at Runtime
+
+• Symptom: dlopen() fails at runtime with undefined symbol: _ZN3sdk4InitEv in the Bazel-built shared library, even though compilation succeeded.
+• Diagnosis Steps:
+	1. Check dynamic symbol table (-D) and needed libraries (-d) on both Make and Bazel .so files:bash
+nm -D --defined-only make_out/libsensor.so | grep Init
+nm -D --defined-only bazel-bin/src/libsensor.so | grep Init
+readelf -d bazel-bin/src/libsensor.so | grep NEEDED
+Use code with caution.
+	2. Check if Bazel stripped an archive dependency because no symbols were directly referenced by the .so (common with plugin registries).
+• Fix:
+	• In Bazel, wrap the static library dependency with alwayslink = True on the cc_library rule. This forces the linker to pass --whole-archive so static initializers and plugin symbols aren't dropped.
+
+Scenario 4: Finding Hidden Header/File Dependencies in Legacy Make via strace
+
+• Symptom: A Make target compiles cleanly, but migrating it to Bazel fails with fatal error: generated_version.h: No such file or directory.
+• Diagnosis Script (audit_deps.py):
+Run strace -f -e trace=openat,execve -o trace.log make target and execute:python
+import os
+import re
+
+WORKSPACE = os.path.abspath(".")
+IGNORED_PREFIXES = ("/usr", "/lib", "/etc", "/proc", "/dev", "/sys")
+opened = set()
+
+regex = re.compile(r'openat\([^,]+,\s*"([^"]+)"')
+with open("trace.log", "r", encoding="utf-8", errors="ignore") as f:
+    for line in f:
+        if "ENOENT" in line or "O_WRONLY" in line or "O_CREAT" in line:
+            continue
+        m = regex.search(line)
+        if m:
+            filepath = os.path.abspath(m.group(1))
+            if not filepath.startswith(IGNORED_PREFIXES) and os.path.isfile(filepath):
+                opened.add(os.path.relpath(filepath, WORKSPACE))
+
+for item in sorted(opened):
+    print(item)
+Use code with caution.
+• Fix: Compare the printed file list against bazel query 'deps(//target)'. Any file printed by audit_deps.py that is missing from Bazel's dependency graph must be added to hdrs, srcs, or data.
+
+Scenario 5: Prometheus Alert Fatigue on Ephemeral CI Runners
+
+• Symptom: HighMemoryUsage alert fires constantly when K8s CI pods spin up heavy C++ linkers (ld / lld), then resolves 45 seconds later.
+• Broken PromQL:promql
+(container_memory_working_set_bytes{namespace="ci-runners"} / kube_pod_container_resource_limits{resource="memory"}) > 0.85
+Use code with caution.
+• Root Cause: Instantaneous spikes during linking are normal; alerting without time-smoothing or checking OOMKills creates noise.
+• Fixed PromQL (Sustained Saturation + Actual OOM Check):promql
+# Alert only if memory stays > 90% for 5+ minutes OR if OOMKills actually occur
+(
+  avg_over_time(
+    (container_memory_working_set_bytes{namespace="ci-runners"} 
+     / kube_pod_container_resource_limits{resource="memory"})[5m:]
+  ) > 0.90
+)
+or
+(
+  increase(kube_pod_container_status_restarts_total{namespace="ci-runners"}[5m]) > 0
+)
+Use code with caution.
+
+Scenario 6: Dynamic Pipeline Script (Routing CI Checks by Changeset)
+
+• Scenario: Given git diff --name-only origin/main...HEAD, determine which validation tier to execute.bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+CHANGED_FILES=$(git diff --name-only origin/main...HEAD)
+
+if [[ -z "$CHANGED_FILES" ]]; then
+    echo "No changes detected."
+    exit 0
+fi
+
+# 1. Docs-only check
+if ! echo "$CHANGED_FILES" | grep -qvE '\.(md|txt|rst)$'; then
+    echo "TIER=DOCS_ONLY"
+    exit 0
+fi
+
+# 2. SDK or Toolchain version bump
+if echo "$CHANGED_FILES" | grep -qE '^(WORKSPACE|MODULE\.bazel|toolchains/|sdk_version\.bzl)'; then
+    echo "TIER=FULL_SDK_REGRESSION"
+    exit 0
+fi
+
+# 3. New Hardware Platform definition
+if echo "$CHANGED_FILES" | grep -qE '^platforms/'; then
+    echo "TIER=HARDWARE_MATRIX_VALIDATION"
+    exit 0
+fi
+
+# 4. Customer Package addition/modification
+if echo "$CHANGED_FILES" | grep -qE '^packages/customers/'; then
+    echo "TIER=CUSTOMER_PACKAGE_AUDIT"
+    exit 0
+fi
+
+# 5. Default: Impacted Bazel targets only
+echo "TIER=IMPACTED_TARGETS"
+Use code with caution.
+
+---
+
+<FollowUp>
+Would you like me to:
+* Generate this as a **downloadable `.md` or `.pdf` file**?
+* Add a **Bazel `cc_toolchain` Starlark configuration** example for cross-compiling to custom hardware?
+* Include a **runbook template** for CI/CD pipeline outages (e.g., remote cache misses or runner exhaustion)?
+</FollowUp>
