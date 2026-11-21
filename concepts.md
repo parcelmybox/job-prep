@@ -316,9 +316,87 @@ Use code with caution.
 
 ---
 
-<FollowUp>
-Would you like me to:
-* Generate this as a **downloadable `.md` or `.pdf` file**?
-* Add a **Bazel `cc_toolchain` Starlark configuration** example for cross-compiling to custom hardware?
-* Include a **runbook template** for CI/CD pipeline outages (e.g., remote cache misses or runner exhaustion)?
-</FollowUp>
+
+
+## Deep Dive: PromQL CAS Cache Hit Ratio Query
+
+### The Query
+```promql
+sum(rate(rbe_cas_operations_total{result="hit"}[5m]))
+/
+sum(rate(rbe_cas_operations_total[5m]))
+```
+
+---
+
+### 1. Step-by-Step Execution Breakdown
+
+Prometheus evaluates this expression from the inside out:
+
+1. **Metric & Label Filtering (`rbe_cas_operations_total{result="hit"}`)**
+   * `rbe_cas_operations_total` is a **Counter** metric (a monotonically increasing number that only goes up or resets to `0` on pod restart).
+   * `{result="hit"}` filters the time series down to only successful cache lookups (e.g., `FindMissingBlobs` or `GetActionResult` calls where the digest already existed in CAS).
+   * The denominator omits `{result="hit"}` so it selects **all** operations (`result="hit"` + `result="miss"` + any `result="error"`).
+
+2. **Range Vector Selection (`[5m]`)**
+   * Appending `[5m]` converts an instant vector (a single point in time) into a **range vector**—a sliding window containing all raw counter samples collected over the last 5 minutes.
+   * *Rule of thumb:* Always make the range window at least **$4\times$ your Prometheus `scrape_interval`** (e.g., if `scrape_interval` is `15s` or `30s`, `[5m]` gives 10–20 data points per series, smoothing out single-scrape jitter).
+
+3. **Per-Second Rate Calculation (`rate(...[5m])`)**
+   * Because `rbe_cas_operations_total` is a cumulative counter (e.g., `10,450,200` total hits since startup), raw numbers are meaningless for current health.
+   * `rate()` calculates the **average per-second increase** over the 5-minute window and automatically handles **counter resets** (if a CAS server pod restarts and its counter drops back to `0`, `rate()` detects the drop and prevents false negative spikes).
+
+4. **Cluster-Wide Aggregation (`sum(...)`)**
+   * In a distributed RBE setup, you run multiple CAS storage pods/replicas (each with its own `instance` or `pod` label).
+   * `rate()` produces one per-second rate per pod.
+   * `sum()` aggregates those individual pod rates into a single cluster-wide number (total hits/sec across all pods divided by total requests/sec across all pods).
+
+5. **Ratio Division (`/`)**
+   * Divides total cluster hits/sec by total cluster requests/sec, yielding a decimal between `0.0` (0% hit rate) and `1.0` (100% hit rate). Multiply by `100` in Grafana if displaying as a `0–100%` percentage gauge.
+
+---
+
+### 2. Why Order of Operations Matters (`sum(rate(...))` vs `rate(sum(...))`)
+
+A classic Prometheus interview question and production bug is reversing `sum` and `rate`:
+
+* **Correct:** `sum(rate(metric[5m]))`
+  * Calculates the per-second rate and handles counter resets **per pod first**, then adds the rates together.
+* **Broken:** `rate(sum(metric)[5m])`
+  * Sums raw counters across pods first. If **one** CAS pod restarts, the combined sum drops sharply, tricking `rate()` into thinking the entire cluster reset and causing massive artificial spikes in your dashboard.
+
+---
+
+### 3. Production Caveats & Refinements
+
+| Edge Case | What Happens with the Base Query | How to Fix It |
+| :--- | :--- | :--- |
+| **Idle CI Cluster (Zero Traffic)** | During nights/weekends when `0` builds run, the denominator is `0`, resulting in `NaN` (0/0), which can break Grafana panels or trigger false alerts. | Append `or vector(1)` or guard alerts with `and sum(rate(rbe_cas_operations_total[5m])) > 10` so alerts only fire under active build load. |
+| **Action Cache (AC) vs. CAS Mixing** | `FindMissingBlobs` (CAS) naturally has many "misses" during normal incremental builds (new `.o` files), whereas `GetActionResult` (AC) should stay high (`>85%`). | Filter by RPC method explicitly: `{method="FindMissingBlobs", result="hit"}` vs `{method="GetActionResult", result="hit"}`. |
+| **Per-Repository / Per-Team Breakdown** | A single global number hides if one specific team's `BUILD` rules are non-hermetic. | Add `by (instance_name)` or `by (repo)`: `sum by (repo) (rate(...{result="hit"}[5m])) / sum by (repo) (rate(...[5m]))`. |
+
+---
+
+### 4. Production-Ready Alert Rule Example (Prometheus YAML)
+
+```yaml
+groups:
+  - name: rbe-cas-alerts
+    rules:
+      - alert: RbeActionCacheHitRateLow
+        expr: |
+          (
+            sum(rate(rbe_cas_operations_total{method="GetActionResult", result="hit"}[15m]))
+            /
+            sum(rate(rbe_cas_operations_total{method="GetActionResult"}[15m]))
+          ) < 0.70
+          and
+          sum(rate(rbe_cas_operations_total{method="GetActionResult"}[15m])) > 5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RBE Action Cache hit rate dropped below 70% (current: {{ \$value | humanizePercentage }})"
+          description: "Sustained cache misses indicate likely non-hermetic build inputs (e.g., timestamps, leaked env vars, or SDK toolchain drift)."
+```
+
