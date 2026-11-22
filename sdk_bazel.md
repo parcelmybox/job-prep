@@ -283,6 +283,28 @@ cc_binary(
 | **`"requires-network"`** | Grants network access inside the sandbox (by default, Bazel blocks internet access during build/test actions). |
 | **`"exclusive"`** | Runs a test target by itself with no other tests running concurrently on the same machine (used for hardware/port-binding tests). |
 
+# Example bazel targets for cache effectiveness
+
+```
+bazel
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+# Frequently changing packaging or dynamic build-info target:
+# Executes on RBE, but skips uploading large ephemeral outputs to the shared CAS.
+cc_binary(
+    name = "nightly_bundle_builder",
+    srcs = ["bundle_main.cpp"],
+    tags = ["no-remote-cache"],
+)
+
+# Example with genrule (e.g., embedding volatile git commit metadata)
+genrule(
+    name = "generate_build_stamp",
+    outs = ["build_stamp.txt"],
+    cmd = "date -u +%Y%m%dT%H%M%SZ > $@",
+    tags = ["no-cache"],  # Never cache locally or remotely
+)
+```
 ---
 
 ## 5. `BUILD` vs. `BUILD.bazel` vs. `defs.bzl`
