@@ -51,6 +51,122 @@ armv7e_filegroup = rule(
 ```
 * **Why `glob = native.glob` is in `.bzl`:** In `BUILD` files, `glob()` is available globally. Inside `.bzl` files, built-in `BUILD` functions are hidden under the `native` module, so `glob = native.glob` exposes it to macros defined in that `.bzl` file.
 
+# Bazel Multi-Platform Transitions, Release Optimization & CI Query Validation Guide
+
+---
+
+## 1. `hello_cross` vs. `hello_transition_release`: Architectural Comparison
+
+| Dimension | `hello_cross` (CLI-Driven Cross-Compilation) | `hello_transition_release` (Starlark Split Transition) |
+| :--- | :--- | :--- |
+| **How Target Platform is Chosen** | Externally via CLI flag (`--platforms=//:linux_x86_64`). | Internally inside `transitions.bzl` (`transition(...)` overrides `--platforms` automatically). |
+| **Builds per `bazel build` Call** | **1 architecture** per command invocation. | **3 architectures simultaneously** (`macos_arm64`, `linux_x86_64`, `linux_arm64`) in a single build graph. |
+| **Starlark Mechanism** | Standard `rule(...)` reading `ctx.file.target_bin` in the host/target config. | **1:N Split Transition** attached to `attr.label(cfg = _multi_platform_transition)` and read via `ctx.split_attr.binary`. |
+| **Security Allowlist Needed?** | No. | Yes—requires `_allowlist_function_transition` attribute on the `release_bundle` rule. |
+| **Output Artifact** | Single executable (`bazel-bin/hello_world`) + text report (`hello_format_report.txt`). | Single multi-architecture release archive (`bazel-bin/hello_release.tar.gz`) containing all 3 binaries + `MANIFEST.txt`. |
+| **Best Use Case** | Fast local iteration & debugging on a single target board/OS. | CI/CD release pipelines, multi-arch packaging, and SDK/appliance distribution. |
+
+---
+
+## 2. Enforcing `--compilation_mode=opt` Inside `_multi_platform_transition_impl`
+
+In production release pipelines, you don't want engineers or CI runners to forget `-c opt` (`--compilation_mode=opt`). You can lock release optimization flags directly into your Starlark transition so every split branch compiles with `-O2`/`-DNDEBUG` automatically—even if the user runs a plain `bazel build //:hello_release`.
+
+### Updated `transitions.bzl` Snippet
+```python
+def _multi_platform_transition_impl(settings, attr):
+    """1:N Split Transition with enforced Release Optimization (-c opt).
+    Overrides BOTH `--platforms` and `--compilation_mode` for every target
+    entering through `release_bundle(binary = ...)`.
+    """
+    return {
+        "macos_arm64": {
+            "//command_line_option:platforms": str(attr.macos_platform),
+            "//command_line_option:compilation_mode": "opt",
+        },
+        "linux_x86_64": {
+            "//command_line_option:platforms": str(attr.linux_x86_64_platform),
+            "//command_line_option:compilation_mode": "opt",
+        },
+        "linux_arm64": {
+            "//command_line_option:platforms": str(attr.linux_arm64_platform),
+            "//command_line_option:compilation_mode": "opt",
+        },
+    }
+
+_multi_platform_transition = transition(
+    implementation = _multi_platform_transition_impl,
+    inputs = [],
+    # Every flag returned in the dictionary MUST be listed in `outputs`
+    outputs = [
+        "//command_line_option:platforms",
+        "//command_line_option:compilation_mode",
+    ],
+)
+```
+* **Key Rule:** Any `"//command_line_option:<flag>"` modified in the return dictionary **must** be explicitly declared in the `outputs = [...]` list of `transition(...)`, or Bazel will fail during the Analysis Phase.
+
+---
+
+## 3. CI Validation Process Using `query`, `cquery`, and `aquery` Based on Changesets
+
+When a Pull Request arrives, your CI orchestrator inspects `git diff --name-only` and uses the right query layer depending on **what changed**:
+
+### Scenario A: Source Code / Header Change (`platform_info.cpp` or `.h`)
+**Goal:** Find all impacted test targets and check whether the multi-platform release bundle is affected.
+* **Tool:** `bazel query` (fast Loading Phase graph traversal).
+```bash
+# 1. Find all tests impacted by the changed C++ file (excluding manual hardware tests)
+bazel query 'kind(".*_test", rdeps(//..., //:platform_info.cpp)) - attr(tags, "manual", //...)'
+
+# 2. Check if the release tarball target is impacted by this change
+bazel query 'rdeps(//:hello_release, //:platform_info.cpp)'
+```
+
+---
+
+### Scenario B: New Hardware / Platform or `select()` Change (`BUILD.bazel` / `platforms/`)
+**Goal:** Verify that the 1:N split transition forks into all expected configurations and resolves the right platform-specific dependencies without actually compiling yet.
+* **Tool:** `bazel cquery` (evaluates `select()`, transitions, and `--platforms`).
+```bash
+# 1. Verify `hello_release` forks `:hello_world` into 3 distinct configuration hashes
+bazel cquery 'deps(//:hello_release)' | grep '//:hello_world'
+# Expected output shows 3 distinct config hashes, e.g.:
+# //:hello_world (a1b2c3d)
+# //:hello_world (e4f5g6h)
+# //:hello_world (9i0j1k2)
+
+# 2. Inspect exact output artifact paths per transitioned platform
+bazel cquery 'deps(//:hello_release)' --output=files | grep 'hello_world$'
+```
+
+---
+
+### Scenario C: SDK Version Bump or Compiler Flag / Transition Change (`MODULE.bazel` / `transitions.bzl`)
+**Goal:** Audit the exact compiler flags (`-O2`, `-DNDEBUG`, target triples, sysroot paths) and linker flags across each transitioned architecture **before** running expensive hardware-in-the-loop (HIL) tests.
+* **Tool:** `bazel aquery` (inspects the Action Graph command lines).
+```bash
+# 1. Verify that `--compilation_mode=opt` (-O2 / -DNDEBUG) was applied to CppCompile actions
+bazel aquery 'mnemonic("CppCompile", deps(//:hello_release))' \
+
+  | grep -E '(Command Line:|TARGET_CPU|-O2|-DNDEBUG|--target=)'
+
+# 2. Verify the exact packaging command & inputs for the final release tarball
+bazel aquery 'mnemonic("PackageReleaseTarball", //:hello_release)'
+```
+
+---
+
+### Summary CI Decision Matrix
+
+| Changeset Trigger | Query Tool | CI Validation Action |
+| :--- | :--- | :--- |
+| **Docs / `.md` only** | None (`git diff`) | Skip Bazel entirely; run markdown/spell linter. |
+| **`.cpp` / `.h` edit** | `bazel query` | Run `rdeps` to test only impacted `*_test` targets. |
+| **`BUILD.bazel` / `platforms/` edit** | `bazel cquery` | Verify `select()` branches and transition configuration splits resolve cleanly. |
+| **`MODULE.bazel` / `transitions.bzl` / SDK bump** | `bazel aquery` | Audit exact compiler/linker flags (`-O2`, target triples) and run full `bazel build //:hello_release`. |
+
+
 ### C. RPM Packaging Snippet (`rpms.cp`)
 ```python
 rpms.cp(
