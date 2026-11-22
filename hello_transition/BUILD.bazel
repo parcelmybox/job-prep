@@ -1,0 +1,57 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+load(":transitions.bzl", "release_bundle")
+
+# ==============================================================================
+# 1. TARGET PLATFORMS (OS + CPU Constraint Constants)
+# ==============================================================================
+platform(
+    name = "macos_arm64",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+platform(
+    name = "linux_x86_64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+platform(
+    name = "linux_arm64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+# ==============================================================================
+# 2. C++ LIBRARY & EXECUTABLE
+# ==============================================================================
+cc_library(
+    name = "platform_info_lib",
+    srcs = ["platform_info.cpp"],
+    hdrs = ["platform_info.h"],
+)
+
+cc_binary(
+    name = "hello_world",
+    srcs = ["main.cpp"],
+    deps = [":platform_info_lib"],
+)
+
+# ==============================================================================
+# 3. MULTI-PLATFORM RELEASE BUNDLE (Uses 1:N Split Transition)
+#    Running `bazel build //:hello_release` compiles `:hello_world` 3 times
+#    (macOS arm64, Linux x86_64, Linux arm64) and packs `hello_release.tar.gz`.
+# ==============================================================================
+release_bundle(
+    name = "hello_release",
+    binary = ":hello_world",
+    macos_platform = ":macos_arm64",
+    linux_x86_64_platform = ":linux_x86_64",
+    linux_arm64_platform = ":linux_arm64",
+)
