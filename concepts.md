@@ -400,3 +400,127 @@ groups:
           description: "Sustained cache misses indicate likely non-hermetic build inputs (e.g., timestamps, leaked env vars, or SDK toolchain drift)."
 ```
 
+
+## Deep Dive: Kubernetes Node Taints & Tolerations + Prometheus TSDB Time Series
+
+---
+
+## Part 1: Kubernetes Node Taints & Tolerations
+
+### 1. Core Concept
+* **Taint (Applied to a Node):** A "repellent" label placed on a Kubernetes node that **prevents** pods from scheduling onto it unless the pod explicitly declares permission.
+* **Toleration (Applied to a Pod):** A "pass" declared in a pod's spec allowing (but not forcing) it to be scheduled onto a node with a matching taint.
+* **Why It Matters in CI / RBE:** Isolates heavyweight C++ compile/link workers or GPU/HIL test runners from lightweight system pods (Prometheus, CoreDNS, Argo controllers) so heavy builds don't starve critical control-plane services of CPU/RAM.
+
+---
+
+### 2. Taint Effects
+
+| Effect | Behavior on New Pods | Behavior on Already-Running Pods |
+| :--- | :--- | :--- |
+| **`NoSchedule`** | Hard block: Pod will **not** be scheduled onto the node without a matching toleration. | Existing pods stay running undisturbed. |
+| **`PreferNoSchedule`** | Soft block: Scheduler tries to avoid the node, but places the pod there if the cluster has no other capacity. | Existing pods stay running undisturbed. |
+| **`NoExecute`** | Hard block: Pod will not be scheduled onto the node. | **Evicts** any existing pod on the node that lacks a matching toleration (or exceeds `tolerationSeconds`). |
+
+---
+
+### 3. Practical CI / RBE Example
+
+#### Step A: Taint Dedicated High-CPU Build Nodes
+```bash
+# Repel general workloads from heavy Bazel RBE worker nodes
+kubectl taint nodes rbe-worker-01 workload=heavy-build:NoSchedule
+```
+
+#### Step B: Pod Spec with Matching Toleration + Node Affinity
+*Note:* A **toleration** only permits scheduling on the tainted node—it does not guarantee the pod lands there. Pair it with **`nodeAffinity`** to lock heavy build pods onto those nodes.
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bazel-rbe-executor
+  namespace: ci-runners
+spec:
+  # 1. Allows this pod onto nodes tainted with workload=heavy-build:NoSchedule
+  tolerations:
+    - key: "workload"
+      operator: "Equal"
+      value: "heavy-build"
+      effect: "NoSchedule"
+
+  # 2. Forces this pod to ONLY run on nodes labeled workload=heavy-build
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: workload
+                operator: In
+                values: ["heavy-build"]
+
+  containers:
+    - name: rbe-worker
+      image: buildbarn/bb-worker:latest
+      resources:
+        requests:
+          cpu: "16"
+          memory: "64Gi"
+```
+
+---
+
+## Part 2: New Time Series in Prometheus Memory & TSDB
+
+### 1. What Defines a Unique Time Series?
+In Prometheus, a **time series** is uniquely identified by its **metric name + exact set of key-value labels**:
+
+\[\text{Unique Time Series} = \text{Metric Name} + \{\text{label}_1=\text{val}_1, \text{label}_2=\text{val}_2, \dots\}\]
+
+Whenever a scrape introduces a **never-before-seen label value**, Prometheus treats it as a brand-new time series—even if the metric name is identical.
+
+---
+
+### 2. Concrete Example: Low vs. High Cardinality
+
+#### Low Cardinality (Healthy)
+```text
+rbe_cas_operations_total{method="FindMissingBlobs", result="hit"}   -> Series #1
+rbe_cas_operations_total{method="FindMissingBlobs", result="miss"}  -> Series #2
+rbe_cas_operations_total{method="BatchReadBlobs",   result="hit"}   -> Series #3
+rbe_cas_operations_total{method="BatchReadBlobs",   result="miss"}  -> Series #4
+```
+* **Total Series:** \(2 \text{ methods} \times 2 \text{ results} = \mathbf{4 \text{ time series}}\) (constant over time).
+
+#### High Cardinality (Dangerous — "Cardinality Explosion")
+Adding unbounded labels like `commit_sha` or `build_id`:
+```text
+rbe_cas_operations_total{method="FindMissingBlobs", commit_sha="a1b2c3d"} -> Series #1
+rbe_cas_operations_total{method="FindMissingBlobs", commit_sha="e4f5g6h"} -> Series #2
+# ... after 10,000 CI builds in a week:
+rbe_cas_operations_total{method="FindMissingBlobs", commit_sha="z9y8x7w"} -> Series #10,000
+```
+* **Total Series:** Grows infinitely with every commit, causing **series churn**.
+
+---
+
+### 3. What Happens Inside Prometheus Memory & TSDB?
+
+1. **In-Memory Head Block (RAM):**
+   * Prometheus keeps the active 2-hour window ("Head Block") completely in **RAM** for fast ingestion and querying.
+   * Every active time series requires ~**2–4 KB of RAM** for its metadata, inverted index postings, and sample chunks.
+   * *Math:* $1,000,000 \text{ active series} \times 3\text{ KB} \approx \mathbf{3\text{ GB of RAM}}$ just for the head block (before query evaluation buffers).
+2. **Inverted Index Bloat (Disk TSDB):**
+   * Every 2 hours, Prometheus flushes the Head Block to an immutable on-disk **TSDB block** containing an **inverted index** mapping every `label="value"` pair to its series IDs.
+   * Unbounded labels (`commit_sha`, `pod_uid`, `user_email`) bloat the index size on disk, slow down regex/label lookups (`{commit_sha=~"..."}`), and trigger **OOMKilled** crashes during compaction or wide range queries (`[7d]`).
+
+---
+
+### 4. Quick Checklist to Prevent Cardinality Explosions
+* **Never** put `commit_sha`, `build_uuid`, `pod_name` (if ephemeral), `user_id`, or full file paths in Prometheus metric labels.
+* **Keep high-cardinality metadata in Logs (Loki) or Traces (Tempo/Jaeger)**—use Prometheus strictly for aggregated service/subsystem health (`method`, `status_code`, `queue_name`, `hardware_tier`).
+* **Inspect Top Series in Prometheus:** Run this PromQL query to find which metric is consuming the most TSDB series:
+  ```promql
+  topk(10, count by (__name__)({__name__=~".+"}))
+  ```
+
