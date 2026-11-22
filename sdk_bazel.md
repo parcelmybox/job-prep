@@ -190,6 +190,8 @@ rpms.cp(
 | **`[]`** | **List** | Ordered collections of items—used for attributes expecting multiple values (`srcs`, `deps`, `copts`, `outputs`) and list comprehensions. | `srcs = ["a.cpp", "b.cpp"]`<br>`outputs = ["//command_line_option:platforms"]`<br>`[dep[DefaultInfo].files for dep in ...]` |
 | **`{}`** | **Dictionary (`dict`)** | Key-value mappings—used for rule `attrs` definitions, `select()` condition branches, `env` variables, and transition return values. | `attrs = {"deps": attr.label_list(...)}`<br>`select({":arm": [...], "//conditions:default": [...]})`<br>`{"//command_line_option:platforms": "//:armv7e"}` |
 
+<!-- BEGIN_CODE_EXCERPT: bazel_select_example -->
+```python
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
 
 # ==============================================================================
@@ -262,6 +264,8 @@ cc_binary(
     deps = [":hardware_driver"],
 )
 
+```
+<!-- END_CODE_EXCERPT: bazel_select_example -->
 ---
 
 ## 4. What Are `tags` in Bazel?
