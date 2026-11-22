@@ -1,0 +1,135 @@
+# Linux & Container Security for CI/CD Runners: Kernel Isolation, cgroups & Rootless Execution
+
+---
+
+## 1. Core Linux Kernel Isolation Boundaries
+
+Unlike Virtual Machines (which isolate hardware via a hypervisor and separate guest kernels), containers share the **host Linux kernel** and rely on layered kernel primitives:
+
+| Boundary Layer | Linux Kernel Mechanism | What It Isolates / Protects |
+| :--- | :--- | :--- |
+| **Visibility & Identity** | **Namespaces** (`pid`, `net`, `mnt`, `uts`, `ipc`, `user`, `cgroup`) | Ensures a build container only sees its own processes (`PID 1`), network interfaces, hostname, and mounted filesystem—hiding host processes and other CI jobs. |
+| **Resource Exhaustion** | **Control Groups (`cgroups v2`)** | Caps CPU, RAM, disk I/O, and PIDs so a runaway C++ compiler or fork bomb cannot OOMKill the host or neighbor pods. |
+| **Privilege Granularity** | **Linux Capabilities** (`CAP_NET_ADMIN`, `CAP_SYS_ADMIN`, etc.) | Splits monolithic `root` power into ~40 discrete permissions. Containers drop dangerous capabilities by default (blocking `mount`, kernel module loading, and raw packet sniffing). |
+| **System Call Surface** | **Seccomp (Secure Computing Mode)** | Filters syscalls made to the shared host kernel (default profiles block ~40+ risky syscalls like `kexec_load`, `reboot`, and `unshare`). |
+| **File & Process Access** | **Mandatory Access Control (SELinux / AppArmor)** | Enforces kernel-level policy labels regardless of UID—blocking a compromised container process from reading host files even if it breaks out as `root`. |
+
+---
+
+## 2. What is the UTS Namespace?
+
+* **UTS** stands for **UNIX Time-Sharing System**.
+* **What it isolates:** Gives each container its own independent **hostname** (`nodename`) and **NIS domain name** (`domainname`) as returned by the `uname()` syscall.
+* **Why it matters in CI:** Every build pod or container gets a unique hostname (such as the Kubernetes Pod name or a random container ID) without altering the host node's hostname, preventing hostname collisions in build logs, license managers, and network services.
+
+---
+
+## 3. `cgroup v1` vs. `cgroup v2`
+
+Control Groups (`cgroups`) meter and cap host hardware resources (CPU, memory, block I/O, PIDs) for groups of processes. Modern Linux distributions and Kubernetes releases default to **cgroup v2** and phase out v1.
+
+| Feature | `cgroup v1` (Legacy) | `cgroup v2` (Modern Standard) |
+| :--- | :--- | :--- |
+| **Hierarchy Model** | **Multiple separate trees:** Each controller (`cpu`, `memory`, `blkio`) has its own independent directory tree (`/sys/fs/cgroup/memory/...` vs `/sys/fs/cgroup/cpu/...`). | **Single unified hierarchy:** Every process belongs to one cgroup tree under `/sys/fs/cgroup/`, with controllers enabled per subtree (`cgroup.subtree_control`). |
+| **Rootless Container Support** | **Unsafe / broken:** Delegating cgroup writes to non-root users in v1 risked privilege escalation, forcing rootless containers to skip resource limits. | **First-class & safe:** Officially supports delegating cgroup subtrees to unprivileged users via `systemd` so rootless builds still enforce RAM/CPU caps. |
+| **I/O & Page Cache Accounting** | Disconnected—buffered disk writes (`writeback`) were not properly billed to the cgroup's memory limit, causing noisy-neighbor host OOMs. | Unified memory + I/O accounting accurately bills page cache and disk writeback to the container that triggered them. |
+| **Contention Metrics (PSI)** | None—only showed raw CPU/RAM usage, not whether tasks were stalled waiting for resources. | **Pressure Stall Information (PSI):** Exposes `cpu.pressure`, `memory.pressure`, and `io.pressure` (supported natively in Kubelet) to detect resource thrashing before OOMKills hit. |
+| **Process Termination** | Racy—runtimes had to loop over PIDs to kill a container, risking fork-bomb escapes. | Atomic `cgroup.kill` file—writing `1` kills every process in the container simultaneously in kernel space. |
+
+---
+
+## 4. SELinux (Security-Enhanced Linux) in Container Environments
+
+Standard Linux permissions (`chmod`/`chown`) are **Discretionary Access Control (DAC)**—if a process runs as `root` (`UID 0`), it bypasses DAC completely. **SELinux** adds **Mandatory Access Control (MAC)** using security contexts (`user:role:type:level`).
+
+1. **Type Enforcement (`container_t` vs. `container_file_t`):**
+   * Container processes run under the restricted domain `container_t`; container image layers and volumes are labeled `container_file_t`.
+   * Host system files (like `/etc/shadow` or `/var/lib/kubelet`) carry protected types (`shadow_t`, `var_lib_t`). Even if a container process escalates to `UID 0` and escapes its mount namespace, the kernel **denies** `container_t` access to host types.
+2. **Multi-Category Security (MCS) for Cross-Container Isolation:**
+   * Every running container is assigned a unique pair of category tags (e.g., `s0:c102,c459`).
+   * Container A (`s0:c102,c459`) cannot read or write files belonging to Container B (`s0:c811,c902`), even though both share `container_file_t`.
+3. **Volume Mount Relabeling (`:z` vs. `:Z`):**
+   * **`:z` (lowercase):** Labels the host directory `container_file_t` with shared MCS categories so **multiple** containers can access it.
+   * **`:Z` (uppercase):** Labels the host directory with a **private** MCS category exclusive to **that single container** (never use `:Z` on shared host system directories like `/home` or `/var`).
+
+---
+
+## 5. Podman Rootless vs. Kubernetes Unprivileged Containers for CI Jobs
+
+### A. How Podman Rootless Works (Single-Node / VM Runners)
+1. **Daemonless Execution:** Unlike Docker, Podman has no persistent root daemon (`dockerd`). When a CI runner user (e.g., `ci-runner`, `UID 1001`) executes `podman run`, the container spawns as a direct child process of that unprivileged user.
+2. **User Namespace UID Remapping (`/etc/subuid` & `/etc/subgid`):**
+   * Container `UID 0` (`root` inside the build image) maps directly to `UID 1001` on the host.
+   * Container `UID 1–65535` map to subordinate host UIDs (`100000–165535`).
+   * If a build script runs `apt-get` or `rpmbuild` as container `root`, a container breakout leaves the attacker on the host as unprivileged `UID 1001`.
+3. **Rootless Networking & Storage:** Uses `pasta` or `slirp4netns` for unprivileged user-space networking and kernel `overlayfs` (or `fuse-overlayfs`) in `~/.local/share/containers`.
+
+### B. How Kubernetes Unprivileged Containers Work (Cluster-Wide CI)
+1. **Standard Unprivileged Pod (`runAsNonRoot: true`, `hostUsers: true` [default]):**
+   * `kubelet` and `containerd`/`CRI-O` run as host `root`, and the pod **shares the host's UID namespace**.
+   * Security relies on running the build process as a non-root UID (`runAsUser: 1000`), dropping all capabilities (`drop: ["ALL"]`), `allowPrivilegeEscalation: false`, and `RuntimeDefault` seccomp.
+   * *Limitation:* If an image requires `UID 0` inside the container, `UID 0` inside the pod is still `UID 0` on the host kernel.
+2. **User-Namespaced Pod (`hostUsers: false` — True Podman-Style Rootless in K8s):**
+   * Maps container `UID 0..65535` to a unique, unprivileged 65k UID block on the Linux host via kernel ID-mapped mounts (`Linux 6.3+`).
+   * Lets a CI build job act as `root` *inside* the container (e.g., building container images with Buildah/Kaniko or installing `.deb`/`.rpm` packages) while remaining completely unprivileged on the Kubernetes worker node.
+
+### C. Side-by-Side Comparison for CI Jobs
+
+| Dimension | Podman Rootless | Kubernetes Unprivileged (`hostUsers: true`) | Kubernetes User-Namespaced (`hostUsers: false`) |
+| :--- | :--- | :--- | :--- |
+| **Container Runtime Daemon** | **None (Daemonless)** — runs as the CI user process. | `containerd` / `CRI-O` runs as host `root`. | `containerd` (2.0+) / `CRI-O` runs as host `root`, spawns pod in `userns`. |
+| **Container `UID 0` on Host** | Mapped to unprivileged host user (e.g., `UID 1001`). | **Blocked** (`runAsNonRoot: true`); if allowed, it equals host `UID 0`. | Mapped to unique unprivileged host UID range (e.g., `UID 131072+`). |
+| **Building Images Inside CI** | Works out of the box (`podman build` / `buildah`). | Requires rootless Buildah/Kaniko workarounds without `CAP_SETUID`. | Works cleanly because `CAP_SETUID` / `CAP_SETGID` are namespaced to the pod. |
+| **Best CI Deployment Fit** | Static VM runners (GitHub Actions self-hosted, Jenkins agents, GitLab Podman executors). | Standard multi-tenant Kubernetes CI pods (Bazel/compiler runners that only need `UID 1000`). | Multi-tenant Kubernetes CI jobs that need `UID 0` inside the build container or nested container builds. |
+
+---
+
+## 6. Hardened Kubernetes CI Build Pod Reference Manifest
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: secure-bazel-ci-runner
+  namespace: ci-runners
+spec:
+  # Enable isolated user namespace (maps container UID 0..65535 to unprivileged host UIDs)
+  hostUsers: false
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: builder
+      image: your-registry/bazel-build-env:latest
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: "8"
+          memory: "32Gi"
+        limits:
+          cpu: "8"
+          memory: "32Gi"
+      volumeMounts:
+        - name: build-tmp
+          mountPath: /tmp
+        - name: build-shm
+          mountPath: /dev/shm
+  volumes:
+    - name: build-tmp
+      emptyDir:
+        medium: Memory
+        sizeLimit: 8Gi
+    - name: build-shm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 2Gi
+```
