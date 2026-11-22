@@ -524,3 +524,264 @@ rbe_cas_operations_total{method="FindMissingBlobs", commit_sha="z9y8x7w"} -> Ser
   topk(10, count by (__name__)({__name__=~".+"}))
   ```
 
+# Bazel Rules vs. Macros & Cross-Compilation Guide (macOS → Linux)
+
+---
+
+## 1. Bazel Macro vs. Bazel Rule
+
+| Feature | Bazel Macro | Bazel Rule |
+| :--- | :--- | :--- |
+| **Definition** | A standard Python-like Starlark function (`def my_macro(...):`). | Created via `rule(implementation = _impl, attrs = {...})`. |
+| **Execution Phase** | **Loading Phase** (expands into underlying rules before the build graph is finalized). | **Analysis Phase** (registers actions like `ctx.actions.run` and returns providers like `DefaultInfo`). |
+| **What It Does** | Wraps, configures, or chains existing rules (e.g., calling `cc_binary` + `genrule` together) to reduce boilerplate. | Invokes compilers, linkers, or custom tools directly on input `File` objects to produce output `File` artifacts. |
+| **Visibility in `bazel query`** | Invisible—`bazel query` only sees the underlying rules the macro generated. | First-class target—visible by its own rule class in `bazel query`. |
+| **When to Use** | Standardizing flags, `deps`, or multi-step target patterns across many `BUILD` files. | Adding support for a new language, compiler, or custom file-transformation step. |
+
+---
+
+## 2. Full Cross-Compilation Example (macOS Host → Linux Target)
+
+On macOS, Bazel's default auto-detected C++ toolchain targets Darwin (`macos`). To cross-compile a Linux ELF binary from a MacBook, you register a cross-compiler toolchain (such as [`hermetic_cc_toolchain`](https://github.com)) and bind it to a Linux `platform()`.
+
+### Project Layout
+```text
+hello_cross/
+├── MODULE.bazel      # External dependencies & cross-toolchain registration
+├── BUILD.bazel       # Platform constants, targets, srcs, and deps
+├── defs.bzl          # Macro vs. Custom Rule definitions
+├── greeter.h         # Header file (demonstrating deps)
+├── greeter.cpp       # Library source file
+└── main.cpp          # Binary entry point
+```
+
+---
+
+### Step 1: `MODULE.bazel` (Registering the Cross-Toolchain)
+```python
+module(
+    name = "hello_cross",
+    version = "1.0.0",
+)
+
+# Standard C++ rules (provides cc_library, cc_binary)
+bazel_dep(name = "rules_cc", version = "0.0.17")
+
+# Standard OS & CPU constraint constants (@platforms//os:linux, @platforms//cpu:x86_64, etc.)
+bazel_dep(name = "platforms", version = "0.0.11")
+
+# Open-source Zig-based hermetic C/C++ cross-compiler (runs natively on macOS Intel & Apple Silicon)
+bazel_dep(name = "hermetic_cc_toolchain", version = "3.1.1")
+
+toolchains = use_extension("@hermetic_cc_toolchain//toolchain:ext.bzl", "toolchains")
+use_repo(toolchains, "zig_sdk")
+
+# Register both Linux targets and native macOS host targets so Bazel can resolve either platform
+register_toolchains(
+    "@zig_sdk//toolchain:linux_amd64_gnu.2.28",
+    "@zig_sdk//toolchain:linux_arm64_gnu.2.28",
+    "@zig_sdk//toolchain:darwin_arm64",
+    "@zig_sdk//toolchain:darwin_amd64",
+)
+```
+
+---
+
+### Step 2: C++ Source & Header Files
+
+#### `greeter.h`
+```cpp
+#pragma once
+#include <string>
+
+std::string get_platform_greeting();
+```
+
+#### `greeter.cpp`
+```cpp
+#include "greeter.h"
+
+std::string get_platform_greeting() {
+#if defined(__linux__)
+    return "Hello from Linux ELF binary (cross-compiled on macOS)!";
+#elif defined(__APPLE__)
+    return "Hello from native macOS Mach-O binary!";
+#else
+    return "Hello from unknown OS!";
+#endif
+}
+```
+
+#### `main.cpp`
+```cpp
+#include <iostream>
+#include "greeter.h"
+
+int main() {
+    std::cout << get_platform_greeting() << std::endl;
+    return 0;
+}
+```
+
+---
+
+### Step 3: `defs.bzl` (Commented Macro vs. Custom Rule)
+```python
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+# ==============================================================================
+# 1. BAZEL MACRO (Loading Phase)
+#    - Just a Starlark helper function that stamps out a `cc_binary` target.
+#    - Does NOT create build actions itself; delegates to `cc_binary`.
+# ==============================================================================
+def strict_cc_binary(name, srcs, deps = [], **kwargs):
+    """Macro that enforces C++20 and strict compiler warnings on any binary."""
+    default_copts = ["-std=c++20", "-Wall", "-Wextra", "-O2"]
+    user_copts = kwargs.pop("copts", [])
+
+    # Expands into a standard cc_binary rule during the Loading Phase
+    cc_binary(
+        name = name,
+        srcs = srcs,                    # Passed directly to cc_binary
+        deps = deps,                    # Passed directly to cc_binary
+        copts = default_copts + user_copts,
+        **kwargs
+    )
+
+
+# ==============================================================================
+# 2. BAZEL RULE (Analysis Phase)
+#    - Low-level primitive that defines inputs, outputs, and shell/binary actions.
+# ==============================================================================
+def _binary_info_impl(ctx):
+    # `ctx.file.<attr_name>` accesses the single File artifact passed to `target_bin`
+    binary = ctx.file.target_bin
+
+    # Declare the output file that this rule promises to produce during execution
+    out_report = ctx.actions.declare_file(ctx.label.name + "_report.txt")
+
+    # Register an action in the build graph (runs `file` utility on the compiled binary)
+    ctx.actions.run_shell(
+        inputs = [binary],              # Sandbox ONLY mounts declared inputs
+        outputs = [out_report],         # Sandbox ONLY extracts declared outputs
+        command = "file -b '%s' > '%s'" % (binary.path, out_report.path),
+        mnemonic = "InspectBinaryFormat",
+        progress_message = "Inspecting binary format for %s" % binary.short_path,
+    )
+
+    # Return DefaultInfo provider so downstream targets or `bazel build` know what files were built
+    return [DefaultInfo(files = depset([out_report]))]
+
+verify_binary_format = rule(
+    implementation = _binary_info_impl,
+    attrs = {
+        # Defines the `target_bin` attribute accepted in BUILD.bazel
+        "target_bin": attr.label(
+            allow_single_file = True,   # Restricts input to a single File artifact
+            mandatory = True,           # Fails analysis if omitted in BUILD.bazel
+        ),
+    },
+)
+```
+
+---
+
+### Step 4: `BUILD.bazel` (Explaining Constants, `srcs`, and `deps`)
+```python
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load(":defs.bzl", "strict_cc_binary", "verify_binary_format")
+
+# ==============================================================================
+# 1. PLATFORM & CONSTRAINT CONSTANTS
+#    - Instead of brittle string flags like `--cpu=k8`, Bazel uses typed
+#      `constraint_value` constants from `@platforms` to match toolchains.
+# ==============================================================================
+platform(
+    name = "linux_x86_64",
+    constraint_values = [
+        "@platforms//os:linux",     # Built-in constant: Target Operating System = Linux
+        "@platforms//cpu:x86_64",   # Built-in constant: Target CPU Architecture = x86_64
+    ],
+)
+
+platform(
+    name = "linux_arm64",
+    constraint_values = [
+        "@platforms//os:linux",     # Built-in constant: Target Operating System = Linux
+        "@platforms//cpu:aarch64",  # Built-in constant: Target CPU Architecture = ARM64
+    ],
+)
+
+# ==============================================================================
+# 2. LIBRARY TARGET (`srcs` vs `hdrs`)
+# ==============================================================================
+cc_library(
+    name = "greeter_lib",
+    # `srcs`: Implementation files (.cpp, .c) compiled into object files (.o / .a)
+    #         Private to this target; NOT exposed directly to downstream consumers.
+    srcs = ["greeter.cpp"],
+
+    # `hdrs`: Public header files (.h, .hpp) exposed to any target that lists
+    #         `:greeter_lib` in its `deps`. Bazel enforces strict header inclusion.
+    hdrs = ["greeter.h"],
+)
+
+# ==============================================================================
+# 3. BINARY TARGET VIA MACRO (`srcs` + `deps`)
+# ==============================================================================
+strict_cc_binary(
+    name = "hello_world",
+    # `srcs`: Source files needed to compile and link this specific executable.
+    srcs = ["main.cpp"],
+
+    # `deps`: Other Bazel library targets (in the same package `:greeter_lib` or
+    #         another package `//path/to/pkg:lib`) whose headers and compiled
+    #         archives must be linked into `:hello_world`.
+    deps = [":greeter_lib"],
+)
+
+# ==============================================================================
+# 4. CUSTOM RULE TARGET
+# ==============================================================================
+verify_binary_format(
+    name = "hello_format",
+    # Passes the output binary of `:hello_world` as an input File to our custom rule
+    target_bin = ":hello_world",
+)
+```
+
+---
+
+### Step 5: Build & Verify Commands on macOS
+
+```bash
+# 1. Cross-compile for Linux x86_64 from your MacBook
+bazel build --platforms=//:linux_x86_64 //:hello_world //:hello_format
+
+# 2. Verify the output report generated by the custom rule
+cat bazel-bin/hello_format_report.txt
+# Output:
+# ELF 64-bit LSB executable, x86-64, version 1 (SYSV), dynamically linked...
+
+# 3. Cross-compile for Linux ARM64 (e.g., AWS Graviton / Raspberry Pi)
+bazel build --platforms=//:linux_arm64 //:hello_world
+file bazel-bin/hello_world
+# Output:
+# bazel-bin/hello_world: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV)...
+
+# 4. Build natively for macOS (no --platforms flag needed)
+bazel build //:hello_world
+file bazel-bin/hello_world
+# Output:
+# bazel-bin/hello_world: Mach-O 64-bit executable arm64
+```
+
+---
+
+## 3. Simplest Open-Source Reference Repositories
+
+If you want clean, minimal open-source repositories to clone and study directly:
+
+1. **`bazelbuild/examples` (Official Bazel Examples Repo)**
+   * **URL:** `https://github.com`
+
