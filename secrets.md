@@ -178,3 +178,81 @@ cosign verify-attestation \
   --certificate-oidc-issuer="https://google.com" \
   ://example.com...
 ```
+
+## 5. Admission Control: Blocking Unsigned Images & Missing SBOMs with Kyverno
+
+Even if your CI pipeline signs container images and attaches SBOM attestations, an engineer or compromised CD job could still deploy an unsigned image directly (`kubectl run ...`) unless Kubernetes enforces verification at admission time.
+
+### Kyverno `ClusterPolicy` YAML (`enforce-signed-images-and-sbom.yaml`)
+
+This policy intercepts Pod creation/updates in protected namespaces (`production`, `staging`), verifies both the **Cosign keyless OIDC image signature** and a **signed CycloneDX SBOM attestation**, and mutates mutable tags (`:latest`) into immutable `@sha256:...` digests.
+
+```yaml
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: enforce-signed-images-and-sbom
+  annotations:
+    policies.kyverno.io/title: Enforce Cosign Image Signature and CycloneDX SBOM
+    policies.kyverno.io/description: >-
+      Blocks deployment of any container image that lacks a valid Cosign keyless
+      signature from our CI workflow OR is missing a signed CycloneDX SBOM attestation.
+spec:
+  # `Enforce` rejects non-compliant Pods immediately (use `Audit` during initial rollout)
+  validationFailureAction: Enforce
+  background: false
+  webhookTimeoutSeconds: 15
+  rules:
+    - name: verify-cosign-signature-and-sbom
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - production
+                - staging
+      verifyImages:
+        - imageReferences:
+            - "://example.com*"
+          # Replaces mutable tags (e.g., :v1.2) with the verified @sha256 digest in the Pod spec
+          mutateDigest: true
+          verifyDigest: true
+          required: true
+
+          # 1. Verify the Container Image Signature (Keyless OIDC via GitHub Actions + Rekor)
+          attestors:
+            - count: 1
+              entries:
+                - keyless:
+                    subject: "https://github.com"
+                    issuer: "https://token.actions.githubusercontent.com"
+                    rekor:
+                      url: "https://rekor.sigstore.dev"
+
+          # 2. Verify that a Signed CycloneDX SBOM Attestation is Attached to the Image
+          attestations:
+            - type: https://cyclonedx.org
+              attestors:
+                - count: 1
+                  entries:
+                    - keyless:
+                        subject: "https://github.com"
+                        issuer: "https://token.actions.githubusercontent.com"
+                        rekor:
+                          url: "https://rekor.sigstore.dev"
+              # Optional: Inspect fields inside the SBOM JSON payload using JMESPath
+              conditions:
+                - all:
+                    - key: "{{ bomFormat }}"
+                      operator: Equals
+                      value: "CycloneDX"
+```
+
+### How It Works at Deployment Time
+1. **Admission Interception:** When Argo CD or `kubectl` submits a `Deployment`/`Pod` in `production`, the Kubernetes API server sends an `AdmissionReview` webhook to Kyverno.
+2. **Signature & Transparency Check:** Kyverno queries the OCI registry for the `.sig` artifact, validates the Fulcio certificate against your CI workflow's OIDC `subject` and `issuer`, and confirms inclusion in the Rekor transparency log.
+3. **Attestation Inspection:** Kyverno fetches the `.att` artifact (`type: https://cyclonedx.org`), verifies its cryptographic signature, and checks that `bomFormat == "CycloneDX"`.
+4. **Digest Pinning (`mutateDigest: true`):** Even if the Deployment manifest referenced `:v1.4.0`, Kyverno rewrites the Pod's `image:` field to `://example.comservice@sha256:...` so the kubelet pulls the exact verified image bytes (preventing TOCTOU tag-swap attacks).
+
+> **Modern Kyverno Note (v1.19+):** In newer Kyverno releases (1.19 / 1.20+), `ClusterPolicy` `verifyImages` rules are superseded by the standalone CEL-based **`ImageValidatingPolicy`** (`policies.kyverno.io/v1`), which performs the same `attestors` and `attestations` checks natively via Kubernetes ValidatingAdmissionPolicies.
