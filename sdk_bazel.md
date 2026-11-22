@@ -309,3 +309,58 @@ Bazel runs actions inside an **unprivileged sandbox** as a non-root user—calli
    * Tag the test with `tags = ["local", "requires-root", "exclusive"]` and run it only on dedicated self-hosted CI runners configured with passwordless `sudo` for that specific test runner wrapper, or run inside a privileged container in CI (`docker run --privileged ...`).
 4. **Vendor SDK Installers Trying to Write to `/opt` or `/usr`:**
    * If a legacy Broadcom/vendor installer expects root to write into `/opt/sdk`, wrap it in a repository rule or `genrule` using **`fakeroot`** + `--prefix=\$OUT_DIR` (or `chroot`/`proot`) so all writes stay inside Bazel's output directory.
+
+
+
+## Kubernetes Pod / Job Configuration (Best Practice)
+
+In Kubernetes, mounting an emptyDir with medium: Memory creates a RAM-backed tmpfs. Setting sizeLimit prevents /tmp or /dev/shm from growing beyond a safe ceiling.
+
+```
+yaml
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bazel-rbe-worker
+  namespace: ci-runners
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: bazel-builder
+          image: your-registry/bazel-build-env:latest
+          env:
+            # Direct Bazel's output_user_root or sandbox tmp to your bounded tmpfs
+            - name: TEST_TMPDIR
+              value: "/tmp/bazel-test"
+          resources:
+            # Keep requests == limits (Guaranteed QoS) so K8s never overcommits RAM
+            requests:
+              cpu: "8"
+              memory: "32Gi"
+            limits:
+              cpu: "8"
+              memory: "32Gi"
+          volumeMounts:
+            # 1. Fast RAM-backed /tmp for compiler scratch files (.o, .s, .d)
+            - name: tmpfs-tmp
+              mountPath: /tmp
+            # 2. Expanded /dev/shm (Docker/K8s defaults to only 64MB, which breaks parallel builds/tests)
+            - name: tmpfs-shm
+              mountPath: /dev/shm
+
+      volumes:
+        - name: tmpfs-tmp
+          emptyDir:
+            medium: Memory
+            # Cap /tmp at 8Gi (25% of pod's 32Gi limit), leaving 24Gi for compiler/JVM processes
+            sizeLimit: 8Gi
+
+        - name: tmpfs-shm
+          emptyDir:
+            medium: Memory
+            # Cap /dev/shm at 2Gi (plenty for POSIX shared memory & browser/IPC tests)
+            sizeLimit: 2Gi
+```
