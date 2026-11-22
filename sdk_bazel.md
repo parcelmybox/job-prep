@@ -190,6 +190,78 @@ rpms.cp(
 | **`[]`** | **List** | Ordered collections of items—used for attributes expecting multiple values (`srcs`, `deps`, `copts`, `outputs`) and list comprehensions. | `srcs = ["a.cpp", "b.cpp"]`<br>`outputs = ["//command_line_option:platforms"]`<br>`[dep[DefaultInfo].files for dep in ...]` |
 | **`{}`** | **Dictionary (`dict`)** | Key-value mappings—used for rule `attrs` definitions, `select()` condition branches, `env` variables, and transition return values. | `attrs = {"deps": attr.label_list(...)}`<br>`select({":arm": [...], "//conditions:default": [...]})`<br>`{"//command_line_option:platforms": "//:armv7e"}` |
 
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+
+# ==============================================================================
+# 1. DEFINE CONFIG_SETTING CONDITIONS
+#    A `config_setting` acts as a named boolean condition that `select()` can match.
+# ==============================================================================
+
+# Condition A: Matches when target OS is Linux AND CPU is ARM64
+config_setting(
+    name = "is_linux_arm64",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
+# Condition B: Matches when building in release optimization mode (`-c opt`)
+config_setting(
+    name = "is_opt_build",
+    values = {
+        "compilation_mode": "opt",
+    },
+)
+
+# ==============================================================================
+# 2. USE `select()` IN `cc_library`
+#    Note: You can match directly against `@platforms//os:linux` OR a custom
+#    `config_setting` like `:is_linux_arm64`.
+# ==============================================================================
+cc_library(
+    name = "hardware_driver",
+    hdrs = ["driver.h"],
+
+    # 1. Choose platform-specific source files via `select()`
+    srcs = select({
+        "@platforms//os:linux": ["driver_linux.cpp"],
+        "@platforms//os:macos": ["driver_macos.cpp"],
+        # Always include `//conditions:default` as a fallback so builds don't fail
+        # on unexpected platforms (e.g., Windows or BSD).
+        "//conditions:default": ["driver_stub.cpp"],
+    }),
+
+    # 2. Combine common flags (`[...]`) with conditional flags (`+ select({...})`)
+    copts = [
+        "-std=c++20",
+        "-Wall",
+    ] + select({
+        ":is_opt_build": ["-O3", "-DNDEBUG"],
+        "//conditions:default": ["-O0", "-g"],
+    }),
+
+    # 3. Inject preprocessor macros (`-D...`) based on CPU architecture
+    defines = select({
+        ":is_linux_arm64": ["ARCH_ARM64_EMBEDDED=1"],
+        "@platforms//cpu:x86_64": ["ARCH_X86_64=1"],
+        "//conditions:default": ["ARCH_GENERIC=1"],
+    }),
+
+    # 4. Conditionally link platform-specific libraries
+    linkopts = select({
+        "@platforms//os:linux": ["-lpthread", "-ldl"],
+        "@platforms//os:macos": ["-framework", "CoreFoundation"],
+        "//conditions:default": [],
+    }),
+)
+
+cc_binary(
+    name = "app",
+    srcs = ["main.cpp"],
+    deps = [":hardware_driver"],
+)
+
 ---
 
 ## 4. What Are `tags` in Bazel?
