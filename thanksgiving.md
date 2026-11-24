@@ -15,7 +15,7 @@
 | **Wed, Nov 25** | 1:30 AM | Arrival Snack / Drink | **Virgin Piña Colada & Indian Sweet** *(Whole coconut, ripe pineapple, sweetened condensed milk — [Reel](https://www.instagram.com/reel/DeLIdmXBaIM/?bqrl=Z3ducmJyNnExcDN5))* | Tropical / Indian (Sweet, Creamy, Tangy) | Homemade |
 | **Wed, Nov 25** | 10:30 AM | Brunch | mexican burrito bowl | Mexican (Spicy, Tangy) | Homemade |
 | **Wed, Nov 25** | 4:00 PM | Refreshment | **Kokum & Ginger Fizz** *(Alcohol-Free)* | Indian Coastal (Sweet, Sour, Spiced) | Homemade |
-| **Wed, Nov 25** | 7:30 PM | Fine Dining (1/2) | **Modern Indian Fine Dining** *(e.g., Paneer Tikka Lababdar, Tamarind Chili Cauliflower, & Rosewater Kulfi)* | Modern Indian (Spiced, Tangy, Sweet) | **Fine Restaurant** |
+| **Wed, Nov 25** | 7:30 PM | Fine Dining (1/2) | **Modern Indian Fine Dining** https://www.wearekhaki.com/ *(e.g., Paneer Tikka Lababdar, Tamarind Chili Cauliflower, & Rosewater Kulfi)* | Modern Indian (Spiced, Tangy, Sweet) | **Fine Restaurant** |
 | **Thu, Nov 26** | 10:30 AM | Brunch | **Shakshuka with Feta & Crusty Sourdough** | Mediterranean/European (Spicy, Tangy) | Homemade |
 | **Thu, Nov 26** | 1:00 PM | Lunch | **Temple Milpitas** | Multi-Cuisine / Temple Prasadam | Temple / Outing |
 | **Thu, Nov 26** | 7:00 PM | Dinner | **Vanaja — Traditional Feast** | Traditional Indian | Homemade / Hosting |
