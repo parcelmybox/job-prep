@@ -59,6 +59,79 @@
 | **Rasmalai Mousse** | **1 cup** makhana, **1/2 cup** almonds, **1/4 cup** pistachios, saffron strands (kesar), **1 spoon** chia seeds, **2 spoons** honey, **2 glasses** So Good high-protein almond milk (unsweetened), extra chopped nuts for garnish | Exact recipe from your notes |
 | **Outing / Cafe** | *No groceries needed* — Visit **Qamaria Yemeni Coffee Co.** ([Website](https://qamariacoffee.com)) | Coffee, Qishr, & desserts |
 
+## Consolidated Shopping Checklist (Nov 25 – Nov 30)
+
+### 1. Indian Grocery Store
+* **Produce & Fresh Herbs:**
+  * [ ] Gongura leaves (sorrel) *(for Gongura Paneer Biryani & Sujana Mathaji's Gongura Chole)*
+  * [ ] Chikkudukaya (Indian flat/broad beans)
+  * [ ] Tender Dondakaya (ivy gourd / tindora)
+  * [ ] Raw green tamarind (or jar of raw tamarind paste for Chintakaya Pachadi)
+  * [ ] Fresh curry leaves
+  * [ ] Thai / Indian green chilies
+  * [ ] Ginger & garlic
+  * [ ] Fresh cilantro & mint leaves
+* **Dairy & Frozen:**
+  * [ ] Paneer (2–3 blocks — for Soya Paneer Tikka Roll, Veg Steam Plate, & Biryani)
+  * [ ] Thick hung curd / plain yogurt
+  * [ ] Tender jackfruit (canned or frozen, for Biryani)
+  * [ ] Pre-made Indian sweets (Khaja & Rasmalai)
+* **Pantry, Dal & Snacks:**
+  * [ ] Makhana (fox nuts — for Rasmalai Mousse & Makhana Fruit Custard)
+  * [ ] Soya chunks (Nutrela)
+  * [ ] Basmati rice & Sona Masoori rice
+  * [ ] Poha (flattened rice)
+  * [ ] Toor dal, chana dal, & urad dal
+  * [ ] Roasted peanuts, sesame seeds, & desiccated coconut
+  * [ ] Tamarind paste / slab
+  * [ ] Tamarind-date chutney & green mint chutney
+  * [ ] Pre-made Puri shells (for Pani Puri) & edible chaat baskets (or phyllo cups)
+  * [ ] Nylon sev & thick sev
+  * [ ] Besan (gram flour) & vanilla custard powder
+* **Whole & Ground Spices:**
+  * [ ] Saffron strands (kesar) & green cardamom pods/powder
+  * [ ] Mustard seeds, cumin seeds, fenugreek seeds, & hing (asafoetida)
+  * [ ] Kashmiri red chili powder, turmeric, coriander powder, garam masala, chole masala, & chaat masala
+  * [ ] Black salt (kala namak) & roasted cumin powder
+  * [ ] Dried red chilies & kasuri methi (dried fenugreek leaves)
+  * [ ] Sesame oil & ghee
+  * [ ] Kokum syrup / concentrate (for Kokum Ginger Fizz)
+
+---
+
+### 2. Sam's Club / Regular Supermarket
+* **Produce & Fruits:**
+  * [ ] Whole fresh coconut (1) & ripe pineapple (1) *(for Virgin Piña Colada)*
+  * [ ] Fresh cranberries (1–2 bags — for Cranberry Tamarind Rice & Dal)
+  * [ ] Ripe avocados (4–5 — for Avocado Salsa)
+  * [ ] Sweet potatoes (3–4 — for Sweet Potato Chaat)
+  * [ ] Mixed sprouts (moong/moth beans)
+  * [ ] Pomegranates (2), apples, bananas, grapes, & mixed berries
+  * [ ] Limes & lemons (plenty for chaats, drinks, & dressings)
+  * [ ] Red onions, yellow onions, & Roma tomatoes
+  * [ ] Russet/Yukon potatoes (for chaat)
+  * [ ] Green cabbage, carrots, bell peppers, spring onions, & jalapeños
+  * [ ] Shiitake mushrooms & daikon radish
+* **Refrigerated & Bakery:**
+  * [ ] Fresh-squeezed orange juice jugs *(Sam's Club)*
+  * [ ] So Good high-protein almond milk (unsweetened — for Rasmalai Mousse)
+  * [ ] Regular milk & heavy whipping cream (for Custard & Tres Leches)
+  * [ ] Eggs (if including Cilbir, Shakshuka, & Dutch Baby) & feta cheese
+  * [ ] Extra-firm tofu (2 blocks — for Korean Bowls, Banh Mi, & Thai Curry)
+  * [ ] Butter, croissants, & crusty sourdough bread
+  * [ ] Whole wheat tortillas/parathas & corn tortillas (for homemade chips)
+  * [ ] Rice paper or momo wrappers (for Paneer Veg Steam Plate)
+* **Pantry, Nuts & Beverages:**
+  * [ ] Sweetened condensed milk (1–2 cans, 14 oz — for Piña Colada & Tres Leches)
+  * [ ] Raw almonds, pistachios, & chia seeds *(Sam's Club)*
+  * [ ] Honey & sugar
+  * [ ] Thai green curry paste, coconut milk, & soy sauce
+  * [ ] Gochujang (Korean chili paste) & rice vinegar
+  * [ ] Lemon curd & dark chocolate bars (for Chili Bark)
+  * [ ] Coca-Cola cans/bottles (for Masala Coke) & club soda / sparkling water
+  * [ ] Tea leaves (for Masala Chai) & coffee beans/grounds
+  * [ ] Olive oil, avocado oil, & Tajín seasoning
+
 ## Highlights
 * **100% Vegetarian & Alcohol-Free:** All non-veg dishes are replaced with paneer, jackfruit, crispy tofu, mushrooms, and lotus root; all drinks (including the arrival Virgin Piña Colada) are completely zero-proof.
 * **Custom Gatherings Integrated:** Includes **Temple Milpitas**, **Vanaja**, **Satsang (MH)**, and the two family dinners at **Vasavi's** and **Gouri's** places.
